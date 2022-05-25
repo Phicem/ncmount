@@ -2,12 +2,14 @@
 
 ncmount is an ncurses-based tool to mount and unmount devices on Linux. It handles devices encrypted with LUKS. It targets users who favor command line and do not use automount programs.
 
-## Dependencies
+## Installation and dependencies
 
 This program relies on :
 * `bash`
 * `lsblk`, generally shipped with `util-linux` package
 * `dialog`
+
+You can test this program without installing, but the best way to use this program is to install it by creating a package for your distribution.
 
 
 ## Basic usage
@@ -94,10 +96,10 @@ With these aliases:
 * typing the command `um` (for UnMount) will show mounted removable media partition and allow to unmount a partition 
 
 
-Of course, for these aliases to work and be convenient, `sudo` must be configured to allow the current user to run `ncmount` without having to type a password. This is typically done (depending on your linux distribution) by adding a file in /etc/sudoers:
+Of course, for these aliases to work and be convenient, `sudo` must be configured to allow the current user to run `ncmount` without having to type a password. This is typically done (depending on your linux distribution) by adding a file similar to this in /etc/sudoers.d:
 
 ```
-# Content of  /etc/sudoers.d/ncmount
+# Content of /etc/sudoers.d/ncmount
 Defaults    insults
 myusername ALL = NOPASSWD: /usr/bin/ncmount
 ```
