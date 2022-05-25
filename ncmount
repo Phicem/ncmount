@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+
+# Dependencies: dialog, util-linux (for lsblk)
+
+show_help()
+{
+    echo -e "$(show_version) - Ncurse Mount Manager\n"
+    echo -e "If no option is specified, ncmount will show all unmounted devices,"
+    echo -e "and allow the user to mount one device."
+    echo -e "\nOptions:\n"
+    echo -e "    -h, -?   help: display this helps and exit\n"
+    echo -e "    -v       version: display version and exit\n"
+    echo -e "    -u       umount: show only mounted devices, and umount the selected device\n"
+    echo -e "    -r       removable: show only removable devices (do not show sata devices)\n"
+    echo -e "    -p       permanent: show only permanent devices (do not show USB devices)\n"
+    echo -e "    -n       dry run: only echo what should be done\n"
+    echo -e "    -d       debug: shows mounted AND unmounted device (even with -u), and do not mount or unmount anything\n"
+
+# Example of alias for goto feature:
+# alias mm='dir="`sudo ncmount -r | grep "^Device mounted on" | awk  '\''{print \$NF}'\'' `" && [ -n "$dir" ] && echo "cd $dir" && cd "$dir"'
+
+
+}
+
+show_version()
+{
+    echo "ncmount v0.3 (january 2016)"
+}
+
+
+
+# DEFAULTS FLAGS
+display_unremovable="True"
+display_removable="True"
+action="mount"
+dryrun=""
+#dryrun="echo "        
+
+# READING OPTIONS
+while getopts "h?vmurpnd" opt; do
+    case "$opt" in
+        h|\?)
+            show_help
+            exit 0
+            ;;
+        v)
+            show_version
+            exit 0
+            ;;
+        u)
+            action="umount"
+            ;;
+        r)
+            display_unremovable="False"
+            ;;
+        p)
+            display_removable="False"
+            ;;
+        n) 
+            dryrun="echo "        
+            ;;
+        d)
+            debug="True"
+            ;;
+
+    esac
+done
+
+if [ "$debug" = "True" ] ; then
+    action="any"
+fi
+
+
+declare -A DATA_ARRAY # declaring outside function to make it global
+
+
+gmount() # gmount(dev_name, mount_point)
+# generic mount function, works with luks
+{
+    dev_name="$1"
+    mount_point="$2"
+    dev_number=`find_device_number "$dev_name" `
+    fstype="${DATA_ARRAY[$dev_number,FSTYPE]}"
+    if [ "$fstype" = "crypto_LUKS" ] ; then
+        luks_name=$(get_luks_name "$dev_name")
+        $dryrun cryptsetup luksOpen "$dev_name" "$luks_name" && $dryrun mount /dev/mapper/$luks_name $mount_point && return 0
+    elif [ "$fstype" = "vfat" ] ; then
+        $dryrun mount "$dev_name" "$mount_point" -o umask=000 && return 0
+    else
+        $dryrun mount "$dev_name" "$mount_point" && return 0
+    fi
+    return 1
+}
+
+
+gumount() # gumount(dev_name)
+# generic umount function, works with luks
+{
+    dev_name="$1"
+    dev_number=`find_device_number "$dev_name" `
+    fstype="${DATA_ARRAY[$dev_number,FSTYPE]}"
+    if [ "$fstype" = "crypto_LUKS" ] ; then
+        luks_name=$(get_luks_name "$dev_name")
+        $dryrun umount /dev/mapper/$luks_name
+        $dryrun cryptsetup luksClose $luks_name
+    else
+        $dryrun umount $dev_name
+    fi
+}
+
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+
+
+build_database() # (DATA_ARRAY,number_of_devices) = build_database()
+# uses lsblk and puts a device database in DATA_ARRAY
+{
+
+    # Generating database with lsblk
+    fields="NAME,TYPE,FSTYPE,UUID,LABEL,SIZE,MOUNTPOINT,HOTPLUG"
+    DATA=`lsblk -n -P -p -o $fields`
+
+    # Putting database in a bash array for easier access
+    old_IFS=$IFS
+    IFS=$'\n'
+    dev_number=1
+    for record in $DATA ; do 
+        i=1
+        IFS=$','
+        for field in $fields ; do
+            IFS=$'\n'
+            # a record looks like << NAME="name" UUID="abcd..." >>
+            # so if using <<">> as field separator, odd fields are field names and even fields are field values
+            DATA_ARRAY[$dev_number,$field]=`echo $record | awk -F '"' '{print $'$((i*2))'}'`
+            # DATA_ARRAY looks like: ([1,NAME]=/dev/sdXy, [1,UUID]="abcd...", [2,NAME]=/dev/sdXZ, [2,UUID]="1234", ...)
+            let i+=1
+        done
+        # Additional fields about the physical drive containing the current partition
+        name="${DATA_ARRAY[$dev_number,NAME]}"
+        if [ "${DATA_ARRAY[$dev_number,TYPE]}" = "part" ] ; then
+            DATA_ARRAY[$dev_number,DISK_MODEL]=`lsblk -ln "$name" -s -o MODEL | tail -n 1`
+            DATA_ARRAY[$dev_number,DISK_SIZE]=`lsblk -ln "$name" -s -o SIZE | tail -n 1`
+            DATA_ARRAY[$dev_number,DISK_SERIAL]=`lsblk -ln "$name" -s -o SERIAL | tail -n 1`
+        fi
+        let dev_number+=1
+    done
+    number_of_devices=$dev_number
+    IFS=${old_IFS}
+}
+
+find_device_number() # find_device_number(dev_name)
+# find device number in database
+{
+    dev_name="$1"
+    for (( i=1; i<=${number_of_devices}; i++ )) ; do
+        if [ "${DATA_ARRAY[$i,NAME]}" = "$dev_name" ] ; then
+            echo $i
+        fi
+    done 
+}
+
+pad() # pad(var,nb)
+# displays var with space padding (total length nb)
+{
+    var="$1                             " # lots of spaces
+    nb="$2"
+    echo "${var:0:$nb}"
+}
+
+get_luks_name() # get_luks_name(device_name)
+{
+    dev="$1"
+    luks_name=${dev//\//_} # a name based on device name (for instance "_dev_sdd1")
+    echo "$luks_name"
+}
+
+build_menu_items() #
+{
+    menu_items=""
+    for (( i=1; i<=${number_of_devices}; i++ )) ; do
+        name="${DATA_ARRAY[$i,NAME]}"
+        fstype="${DATA_ARRAY[$i,FSTYPE]}"
+        size="${DATA_ARRAY[$i,SIZE]}"
+        label="${DATA_ARRAY[$i,LABEL]}"
+        removable="${DATA_ARRAY[$i,HOTPLUG]}"
+        mountpoint="${DATA_ARRAY[$i,MOUNTPOINT]}"
+        disk_model="${DATA_ARRAY[$i,DISK_MODEL]}"
+        disk_size="${DATA_ARRAY[$i,DISK_SIZE]}"
+        disk_serial="${DATA_ARRAY[$i,DISK_SERIAL]}"
+        is_mounted=""
+        if [ "$fstype" = "crypto_LUKS" ] ; then # luks device, special handling is required to know mountpoint
+            luks_name=$(get_luks_name "$name")
+            if [ -e "/dev/mapper/$luks_name" ] ; then
+                is_mounted="True"
+                mountpoint=`lsblk -n -o MOUNTPOINT "/dev/mapper/$luks_name"`
+            fi
+        else
+            if [ -n "$mountpoint" ] ; then
+                is_mounted="True"
+            fi
+        fi
+            
+        # filtering devices to display 
+        # only filesystems
+        # but not luks mappers
+        # removable only (if option set)
+        # permanent device only (if option set)
+        # only not mounted (if trying to mount)
+        # only mounted (if trying to umount)
+        if \
+            [ -n "$fstype" ] \
+            && [ -z `echo $name | grep "/dev/mapper/"` ] \
+            && { [ "$display_removable" = "True" ] || [ "$removable" = "0" ] ;} \
+            && { [ "$display_unremovable" = "True" ] || [ "$removable" = "1" ] ;} \
+            && { 
+                { [ "$action" = "mount" ] && [ -z "$mountpoint" ] ;} \
+                    || \
+                { [ "$action" = "umount" ] && [ -n "$mountpoint" ] ;} \
+                    || \
+                [ "$action" = "any" ] ;} \
+        then
+        # defining output format
+            if [ "$label" = "" ] ; then
+                label_str="(no label)"
+                label_str=" >> $disk_model"
+            else
+                label_str="$label"
+            fi
+            if [ "$action" = "mount" ] ; then 
+                description=$(printf "%b | %b | %b" \
+                    "`pad "$fstype" 6`"\
+                    "`pad "$size" 6`"\
+                    "`pad "$label_str" 19`" )
+            else
+                description=$(printf "%b | %b | %b | %b" \
+                    "`pad "$fstype" 6`"\
+                    "`pad "$size" 6`"\
+                    "`pad "$mountpoint" 15`" \
+                    "`pad "$label_str" 19`" )
+            fi
+        
+        title="$name"
+        hint="MODEL: $disk_model (TOTAL SIZE: $disk_size) - S/N: $disk_serial"
+
+        output="\"$title\" \"$description\" \"$hint\" " 
+        menu_items="$menu_items $output"
+        fi
+    done
+}
+
+build_menu_header()  #
+{
+    menu_action="$action"
+    if [ "$action" = "any" ] ; then
+        menu_action="select (debug)"
+    fi
+    title="Mount Manager"
+    text="Select the device you wish to ${menu_action}:"
+
+    DIALOG_CMD="dialog --stdout --clear \
+            --cancel-label Cancel       \
+            --ok-label Apply            \
+            --item-help                 \
+            --title \"$title\"          \
+            --menu \" ${text} \" 0 0 0" 
+
+}
+
+show_menu() #
+{
+    build_menu_header
+    build_menu_items
+    if [ -z "$menu_items" ] ; then
+        warning_window="dialog --ok-label OK --stdout --clear --title \"Warning\" --msgbox \"No device to display. Program will terminate.\" 6 35 "
+        eval "$warning_window"
+        exit 1
+    else
+        DIALOG_CMD="$DIALOG_CMD $menu_items"
+        #echo "$DIALOG_CMD"
+        result=` eval "$DIALOG_CMD" `
+        echo "$result"
+
+    fi
+
+}
+
+
+uid=`id -u`
+if [ $uid -ne 0 ] ; then
+    echo "Please run this tool as root or with sudo"
+    exit
+fi
+
+build_database
+
+# Show the menu
+dev_name=$(show_menu)
+
+# Process the result
+if [ -n "$dev_name" ] ; then
+    mount_point=/mnt/`echo $dev_name | awk -F '/'  '{ print $NF }' ` 
+    if [ "$action" = "mount" ] ; then
+        $dryrun mkdir -p $mount_point && gmount "$dev_name" "$mount_point" && [ -z $dryrun ] && echo Device mounted on "$mount_point" && exit 0
+    elif [ "$action" = "umount" ] ; then
+        gumount $dev_name && [ -z $dryrun ] && echo "Device $dev_name successfully unmounted" 
+        $dryrun rmdir $mount_point && exit 0
+    fi
+
+else
+    echo "Nothing to do"
+fi
+
+exit 1
+
